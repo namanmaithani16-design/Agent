@@ -32,8 +32,8 @@ class LoginWindow:
         left = tk.Frame(container, bg="#4f7388")
         left.pack(side="left", fill="both", expand=True)
 
-        right = tk.Frame(container, bg="#f2f2f2")
-        right.pack(side="right", fill="both", expand=True)
+        # right = tk.Frame(container, bg="#f2f2f2")
+        # right.pack(side="right", fill="both", expand=True)
 
         # LEFT PANEL
         tk.Label(
@@ -56,6 +56,21 @@ class LoginWindow:
         self.password = tk.Entry(left, show="*", width=30, font=("Arial", 11))
         self.password.pack(pady=10)
 
+        self.show_password_var = tk.BooleanVar()
+        show_password_check = tk.Checkbutton(
+            left,
+            text="Show Password",
+            variable=self.show_password_var,
+            command=self._toggle_password_visibility,
+            bg="#4f7388",
+            fg="white",
+            selectcolor="#4f7388",
+            activebackground="#4f7388",
+            activeforeground="white",
+            font=("Arial", 10)
+        )
+        show_password_check.pack(pady=(0, 10))
+
         self.login_btn = tk.Button(
             left,
             text="Login",
@@ -69,19 +84,26 @@ class LoginWindow:
         self.login_btn.pack(pady=30)
 
         # RIGHT PANEL
-        tk.Label(
-            right,
-            text="Welcome to ISMS",
-            bg="#f2f2f2",
-            font=("Arial", 24)
-        ).pack(pady=(200, 20))
+        # tk.Label(
+        #     right,
+        #     text="Welcome to ISMS",
+        #     bg="#f2f2f2",
+        #     font=("Arial", 24)
+        # ).pack(pady=(200, 20))
 
-        tk.Label(
-            right,
-            text="Employee Monitoring System",
-            bg="#f2f2f2",
-            font=("Arial", 12)
-        ).pack()
+        # tk.Label(
+        #     right,
+        #     text="Employee Monitoring System",
+        #     bg="#f2f2f2",
+        #     font=("Arial", 12)
+        # ).pack()
+
+    def _toggle_password_visibility(self):
+        """Toggles the password visibility in the entry widget."""
+        if self.show_password_var.get():
+            self.password.config(show="")
+        else:
+            self.password.config(show="*")
 
     # ================= LOGIN LOGIC =================
     def login_clicked(self):
@@ -107,7 +129,7 @@ class LoginWindow:
 
             # 🔥 IMPORTANT: Call main callback
             if self.on_success:
-                self.on_success(user)
+                self.on_success()
 
         else:
             messagebox.showerror("Error", "Invalid credentials")

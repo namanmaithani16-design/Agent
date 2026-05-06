@@ -4,6 +4,7 @@ import ctypes
 import time
 from datetime import datetime
 from auth.session import is_active
+from storage.db import log_idle_time
 
 
 # Windows API structure
@@ -30,7 +31,7 @@ def get_idle_seconds():
     return millis / 1000.0
 
 
-def idle_monitor(idle_limit=120):
+def idle_monitor(idle_limit=5):
     """
     idle_limit = 120 seconds (2 minutes)
     """
@@ -58,7 +59,7 @@ def idle_monitor(idle_limit=120):
 
                     print(f"[IDLE END] {idle_end} | Duration: {int(duration)}s")
 
-                    # TODO: Save to DB / API here
+                    log_idle_time(duration)
 
                     is_idle = False
                     idle_start = None
@@ -74,3 +75,4 @@ def idle_monitor(idle_limit=120):
         idle_end = datetime.now()
         duration = (idle_end - idle_start).total_seconds()
         print(f"[SESSION END - IDLE] Duration: {int(duration)}s")
+        log_idle_time(duration)

@@ -3,3 +3,5 @@ pillow
 pyautogui
 psutil
 pystray
+flask
+mysql-connector-python

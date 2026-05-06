@@ -1,7 +1,10 @@
 # agent/ui/logout_ui.py
 
 import tkinter as tk
+from tkinter import messagebox
+import threading
 from auth.login import logout_user
+from storage.db import get_user_tasks
 
 
 class LogoutWindow:
@@ -12,8 +15,19 @@ class LogoutWindow:
         self.root.title("ISMS Logout")
         self.root.state("zoomed")  # Full screen
 
+        # Prevent automatic logout on window close
+        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+
         self.build_ui()
         self.root.mainloop()
+
+    def on_close(self):
+        # Automatically logout if the intern directly closes the window
+        if self.on_logout:
+            self.on_logout()
+            
+        logout_user()
+        self.root.destroy()
 
     def build_ui(self):
         container = tk.Frame(self.root)
@@ -49,48 +63,84 @@ class LogoutWindow:
             text="Monitoring will stop after logout",
             bg="#4f7388",
             fg="white",
-            font=("Arial", 11)
-        ).pack(pady=5)
+            font=("Arial", 12)
+        ).pack(pady=10)
 
-        tk.Button(
+        # Logout button with confirmation
+        logout_btn = tk.Button(
             left,
             text="Logout",
-            bg="#2ecc71",
+            bg="#ff4444",
             fg="white",
-            width=20,
-            height=2,
-            font=("Arial", 11, "bold"),
+            font=("Arial", 16, "bold"),
             command=self.confirm_logout
-        ).pack(pady=30)
+        )
+        logout_btn.pack(pady=20)
 
         # -------- RIGHT CONTENT --------
         tk.Label(
             right,
-            text="Welcome to ISMS",
+            text="Assigned Tasks",
             bg="#ffffff",
-            fg="black",
-            font=("Arial", 24)
-        ).pack(pady=(120, 20))
+            font=("Arial", 20, "bold")
+        ).pack(pady=(80, 20))
 
-        tk.Label(
-            right,
-            text="Employee Monitoring System",
-            bg="#ffffff",
-            fg="black",
-            font=("Arial", 11)
-        ).pack()
+        self.tasks_text = tk.Text(right, wrap="word", height=20, font=("Arial", 12), bg="#f4f4f4", relief="flat", padx=15, pady=15)
+        self.tasks_text.pack(fill="both", expand=True, padx=40, pady=20)
+        self.load_tasks()
 
     def confirm_logout(self):
-        try:
-            # 🔹 Stop session & monitoring
-            logout_user()
-
-            # 🔹 If callback exists (main.py logic)
+        if messagebox.askyesno("Confirm Logout", "Are you sure you want to logout?"):
             if self.on_logout:
-                self.on_logout()
-
-        except Exception as e:
-            print("Logout error:", e)
-
-        finally:
+                self.on_logout()  # Triggers backend logout event FIRST
+                
+            logout_user()         # Clear local session
             self.root.destroy()
+
+    def load_tasks(self):
+        self.tasks_text.config(state="normal")
+        self.tasks_text.delete("1.0", tk.END)
+        self.tasks_text.insert(tk.END, "Loading assigned tasks, please wait...\n", "desc")
+        self.tasks_text.config(state="disabled")
+
+        # Fetch tasks in a background thread to prevent UI blocking
+        threading.Thread(target=self._fetch_tasks_thread, daemon=True).start()
+
+    def _fetch_tasks_thread(self):
+        tasks = get_user_tasks()
+        # Safely update the UI from the main thread once data is retrieved
+        self.root.after(0, self._update_tasks_ui, tasks)
+
+    def _update_tasks_ui(self, tasks):
+        self.tasks_text.config(state="normal")
+        self.tasks_text.delete("1.0", tk.END)
+
+        if not tasks:
+            self.tasks_text.insert(tk.END, "No tasks assigned currently.\n\nGreat job! You are all caught up.", "desc")
+        else:
+            pending = [t for t in tasks if str(t.get("status", "")).lower() != "completed"]
+            completed = [t for t in tasks if str(t.get("status", "")).lower() == "completed"]
+
+            if pending:
+                self.tasks_text.insert(tk.END, "📌 PENDING TASKS\n\n", "header_pending")
+                for idx, task in enumerate(pending, start=1):
+                    title = task.get("title", "Untitled Task")
+                    desc = task.get("description", "No description provided.")
+                    self.tasks_text.insert(tk.END, f"{idx}. {title}\n", "title")
+                    self.tasks_text.insert(tk.END, f"   {desc}\n\n", "desc")
+
+            if completed:
+                self.tasks_text.insert(tk.END, "✅ COMPLETED TASKS\n\n", "header_completed")
+                for idx, task in enumerate(completed, start=1):
+                    title = task.get("title", "Untitled Task")
+                    desc = task.get("description", "No description provided.")
+                    self.tasks_text.insert(tk.END, f"{idx}. {title}\n", "title_completed")
+                    self.tasks_text.insert(tk.END, f"   {desc}\n\n", "desc_completed")
+
+        self.tasks_text.tag_config("header_pending", font=("Arial", 14, "bold"), foreground="#d35400")
+        self.tasks_text.tag_config("header_completed", font=("Arial", 14, "bold"), foreground="#27ae60")
+        self.tasks_text.tag_config("title", font=("Arial", 13, "bold"), foreground="#2c3e50")
+        self.tasks_text.tag_config("desc", font=("Arial", 11), foreground="#555555")
+        self.tasks_text.tag_config("title_completed", font=("Arial", 13, "bold", "overstrike"), foreground="#7f8c8d")
+        self.tasks_text.tag_config("desc_completed", font=("Arial", 11, "overstrike"), foreground="#95a5a6")
+        self.tasks_text.config(state="disabled")

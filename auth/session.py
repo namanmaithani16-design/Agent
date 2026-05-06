@@ -8,11 +8,28 @@ _session_active = False
 _current_user = None
 
 
+def normalize_domain(domain):
+    """
+    Remove empty or placeholder domains before storing them in session state.
+    """
+    if domain is None:
+        return None
+
+    cleaned = str(domain).strip()
+    if not cleaned:
+        return None
+
+    if cleaned.lower() in {"agent", "default", "unknown", "none", "null"}:
+        return None
+
+    return cleaned
+
+
 # =============================
 # SESSION CONTROL
 # =============================
 
-def start_session(user_id, username, role):
+def start_session(user_id, username, role, email=None, domain=None, designation=None):
     """
     Start user session
     """
@@ -22,7 +39,10 @@ def start_session(user_id, username, role):
     _current_user = {
         "user_id": user_id,
         "username": username,
-        "role": role
+        "role": role,
+        "email": email,
+        "domain": normalize_domain(domain),
+        "designation": designation
     }
 
     logger.info(f"Session started for {username}")
@@ -36,7 +56,7 @@ def end_session():
 
     if _current_user:
         logger.info(f"Session ended for {_current_user.get('username')}")
-
+ 
     _session_active = False
     _current_user = None
 

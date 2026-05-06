@@ -2,6 +2,7 @@ import logging
 import sys
 import threading
 import signal
+import time
 
 from ui.login_ui import LoginWindow
 from ui.logout_ui import LogoutWindow
@@ -11,6 +12,9 @@ from monitor.screenshot import capture_screenshot
 
 # ✅ IMPORTANT
 from utils.api_client import send_event
+from storage.db import init_db, log_login, log_logout
+from auth.session import get_current_user
+
 
 
 # ================= LOGGING =================
@@ -25,10 +29,25 @@ logger = logging.getLogger("MAIN")
 _monitoring_running = False
 _shutdown_in_progress = False
 
+_state_lock = threading.Lock()   # 🔹 upgrade: thread safety
+
 _screenshot_thread = None
 _screenshot_stop_event = threading.Event()
 
 SCREENSHOT_INTERVAL = 60  # seconds
+
+# Global variables for session IDs
+_activity_id = None
+_logs_id = None
+
+
+# ================= SAFE SEND WRAPPER =================
+def _safe_send_event(event_type, screenshot_path=None, username=None):
+    try:
+        send_event(event_type, screenshot_path, username)
+        logger.info(f"{event_type} event sent")
+    except Exception as e:
+        logger.error(f"send_event failed ({event_type}): {e}")
 
 
 # ================= SCREENSHOT LOOP =================
@@ -40,10 +59,7 @@ def _screenshot_loop():
             screenshot_path = capture_screenshot("interval")
 
             if screenshot_path:
-                try:
-                    send_event("screenshot", screenshot_path)
-                except Exception as e:
-                    logger.error(f"send_event failed: {e}")
+                _safe_send_event("screenshot", screenshot_path)
 
         except Exception as e:
             logger.error(f"Periodic screenshot failed: {e}")
@@ -57,11 +73,12 @@ def _screenshot_loop():
 def start_monitoring():
     global _monitoring_running
 
-    if _monitoring_running:
-        return
+    with _state_lock:
+        if _monitoring_running:
+            return
 
-    logger.info("Starting background monitoring")
-    _monitoring_running = True
+        logger.info("Starting background monitoring")
+        _monitoring_running = True
 
     threading.Thread(
         target=start_worker,
@@ -72,39 +89,58 @@ def start_monitoring():
 def stop_monitoring():
     global _monitoring_running
 
-    if not _monitoring_running:
-        return
+    with _state_lock:
+        if not _monitoring_running:
+            return
 
-    logger.info("Stopping monitoring")
-    stop_worker()
-    _monitoring_running = False
+        logger.info("Stopping monitoring")
+
+        try:
+            stop_worker()
+        except Exception as e:
+            logger.error(f"Error stopping worker: {e}")
+
+        _monitoring_running = False
 
 
 # ================= CLEAN SHUTDOWN =================
 def shutdown(exit_code=0):
     global _shutdown_in_progress
 
-    if _shutdown_in_progress:
-        return
+    with _state_lock:
+        if _shutdown_in_progress:
+            return
+        _shutdown_in_progress = True
 
-    _shutdown_in_progress = True
     logger.info("Shutting down Employee Agent")
 
     _screenshot_stop_event.set()
     stop_monitoring()
 
+    time.sleep(1)  # 🔹 small delay for clean thread exit
     sys.exit(exit_code)
 
 
 # ================= CALLBACKS =================
-def on_login_success(username):
+def on_login_success():
+    global _activity_id, _logs_id
+
+    current_user = get_current_user()
+    if not current_user:
+        logger.error("on_login_success called, but no user is in session!")
+        return
+
+    username = current_user.get("username")
     logger.info(f"Login successful for user: {username}")
+
+    # Log to database
+    _activity_id, _logs_id = log_login()
 
     # 🔹 Send login event
     try:
         screenshot_path = capture_screenshot("login")
         if screenshot_path:
-            send_event("login", screenshot_path)
+            _safe_send_event("login", screenshot_path, username)
     except Exception:
         logger.exception("Failed to send login event")
 
@@ -127,12 +163,17 @@ def on_login_success(username):
 
 
 def on_logout():
+    global _activity_id, _logs_id
     logger.info("Employee logout initiated")
+
+    # Log logout to database
+    if _activity_id is not None or _logs_id is not None:
+        log_logout(_activity_id, _logs_id)
 
     try:
         screenshot_path = capture_screenshot("logout")
         if screenshot_path:
-            send_event("logout", screenshot_path)
+            _safe_send_event("logout", screenshot_path)
     except Exception:
         logger.exception("Failed to send logout event")
 
@@ -153,8 +194,16 @@ signal.signal(signal.SIGTERM, _handle_signal)
 def main():
     logger.info(f"{APP_NAME} starting")
 
-    login_window = LoginWindow(on_success=on_login_success)
-    login_window.run()
+    # Initialize database
+    init_db()
+     
+
+    try:
+        login_window = LoginWindow(on_success=on_login_success)
+        login_window.run()
+    except Exception as e:
+        logger.exception(f"Fatal error in main loop: {e}")
+        shutdown(1)
 
 
 if __name__ == "__main__":
