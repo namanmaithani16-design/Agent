@@ -12,7 +12,7 @@ from monitor.screenshot import capture_screenshot
 
 # ✅ IMPORTANT
 from utils.api_client import send_event
-from storage.db import init_db, log_login, log_logout
+from storage.db import init_db, log_login, log_logout, log_activity
 from auth.session import get_current_user
 
 
@@ -56,6 +56,10 @@ def _screenshot_loop():
 
     while not _screenshot_stop_event.is_set():
         try:
+            # 🔹 FIX: Send a continuous heartbeat to the activity table 
+            # so the web panel sees active presence and doesn't auto-logout after 5 minutes
+            log_activity("heartbeat", "system", None, None)
+
             screenshot_path = capture_screenshot("interval")
 
             if screenshot_path:

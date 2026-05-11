@@ -58,6 +58,7 @@ def ensure_activity_table(cursor):
             email VARCHAR(150),
             domain VARCHAR(150),
             designation VARCHAR(150),
+            role VARCHAR(50),
             app_name VARCHAR(150),
             action VARCHAR(50),
             start_time DATETIME,
@@ -77,6 +78,7 @@ def ensure_activity_table(cursor):
         "email": "ALTER TABLE activity ADD COLUMN email VARCHAR(150)",
         "domain": "ALTER TABLE activity ADD COLUMN domain VARCHAR(150)",
         "designation": "ALTER TABLE activity ADD COLUMN designation VARCHAR(150)",
+        "role": "ALTER TABLE activity ADD COLUMN role VARCHAR(50)",
         "app_name": "ALTER TABLE activity ADD COLUMN app_name VARCHAR(150)",
         "start_time": "ALTER TABLE activity ADD COLUMN start_time DATETIME",
         "end_time": "ALTER TABLE activity ADD COLUMN end_time DATETIME",
@@ -108,6 +110,7 @@ def receive_activity():
         username = data.get("username")
         email = data.get("email")
         domain = normalize_domain(data.get("domain"))
+        role = data.get("role")  # ✅ NEW: Capture role
         action = data.get("action")
         metadata = data.get("metadata", {})
         screenshot = metadata.get("screenshot")
@@ -126,25 +129,22 @@ def receive_activity():
         ensure_activity_table(cursor)
 
         if action == "login":
-            cursor.execute(
-                """
-                INSERT INTO activity
-                (username, email, domain, designation, app_name, action, login_time, idle_time, screenshot_path, created_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                """,
-                (
-                    username,
-                    email,
-                    domain,
-                    designation,
-                    "system",
-                    "session",
-                    login_time,
-                    idle_time,
-                    screenshot,
-                    timestamp
+            cursor.execute("SELECT id FROM activity WHERE username=%s AND app_name='system' AND action='session' AND logout_time IS NULL LIMIT 1", (username,))
+            active = cursor.fetchone()
+            if active:
+                cursor.execute(
+                    "UPDATE activity SET login_time=%s, idle_time=%s, screenshot_path=COALESCE(%s, screenshot_path), created_at=%s WHERE id=%s",
+                    (login_time, idle_time, screenshot, timestamp, active[0])
                 )
-            )
+            else:
+                cursor.execute(
+                    """
+                    INSERT INTO activity
+                    (username, email, domain, designation, role, app_name, action, login_time, idle_time, screenshot_path, created_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (username, email, domain, designation, role, "system", "session", login_time, idle_time, screenshot, timestamp)
+                )
         elif action == "logout":
             cursor.execute(
                 """
@@ -175,14 +175,15 @@ def receive_activity():
                 cursor.execute(
                     """
                     INSERT INTO activity
-                    (username, email, domain, designation, app_name, action, login_time, logout_time, idle_time, screenshot_path, created_at)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    (username, email, domain, designation, role, app_name, action, login_time, logout_time, idle_time, screenshot_path, created_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
                         username,
                         email,
                         domain,
                         designation,
+                        role,
                         "system",
                         "session",
                         login_time,
@@ -196,14 +197,15 @@ def receive_activity():
             cursor.execute(
                 """
                 INSERT INTO activity
-                (username, email, domain, designation, app_name, action, screenshot_path, created_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                (username, email, domain, designation, role, app_name, action, screenshot_path, created_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     username,
                     email,
                     domain,
                     designation,
+                    role,
                     "system",
                     action,
                     screenshot,
@@ -220,6 +222,186 @@ def receive_activity():
             }
         ), 200
 
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+
+
+# ==============================
+# GET LATEST LOGS FOR DASHBOARD
+# ==============================
+
+@activity_bp.route("/api/logs/latest", methods=["GET"])
+def get_latest_logs():
+    conn = None
+    cursor = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(dictionary=True)
+        
+        cursor.execute(
+            """
+            SELECT l1.*
+            FROM logs l1
+            INNER JOIN (
+                SELECT username, MAX(id) as latest_id
+                FROM logs
+                GROUP BY username
+            ) l2 ON l1.id = l2.latest_id
+            ORDER BY l1.login_time DESC
+            """
+        )
+        logs = cursor.fetchall()
+        
+        return jsonify({"success": True, "logs": logs}), 200
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    finally:
+        if cursor: cursor.close()
+        if conn: conn.close()
+
+
+# ==============================
+# GET USER STATUS (ONLINE/OFFLINE)
+# ==============================
+
+@activity_bp.route("/api/user-status", methods=["GET"])
+def get_user_status():
+    """
+    Get the online/offline status of a user.
+    Returns: { "username": "...", "status": "online|offline", "action": "login|logout", "login_time": "...", "last_activity": "..." }
+    """
+    conn = None
+    cursor = None
+    try:
+        username = request.args.get("username")
+        
+        if not username:
+            return jsonify({"error": "Username parameter required"}), 400
+        
+        conn = get_db_connection()
+        cursor = conn.cursor(dictionary=True)
+        
+        # Get the most recent session activity for this user
+        cursor.execute(
+            """
+            SELECT id, username, email, domain, designation, login_time, logout_time, action, created_at
+            FROM activity
+            WHERE username=%s AND app_name='system' AND action='session'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (username,)
+        )
+        
+        session_row = cursor.fetchone()
+        
+        if not session_row:
+            return jsonify({
+                "username": username,
+                "status": "offline",
+                "action": "login",
+                "login_time": None,
+                "last_activity": None
+            }), 200
+        
+        # If logout_time is NULL, user is online
+        is_online = session_row.get("logout_time") is None
+        
+        return jsonify({
+            "username": username,
+            "status": "online" if is_online else "offline",
+            "action": "logout" if is_online else "login",
+            "login_time": session_row.get("login_time").strftime("%Y-%m-%d %H:%M:%S") if session_row.get("login_time") else None,
+            "last_activity": session_row.get("created_at").strftime("%Y-%m-%d %H:%M:%S") if session_row.get("created_at") else None,
+            "email": session_row.get("email"),
+            "domain": session_row.get("domain"),
+            "designation": session_row.get("designation")
+        }), 200
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+
+
+# ==============================
+# GET ALL ACTIVE USERS
+# ==============================
+
+@activity_bp.route("/api/active-users", methods=["GET"])
+def get_active_users():
+    """
+    Get list of all users with their current status.
+    Filters by role if provided (e.g., ?role=USER)
+    """
+    conn = None
+    cursor = None
+    try:
+        role_filter = request.args.get("role")
+        
+        conn = get_db_connection()
+        cursor = conn.cursor(dictionary=True)
+        
+        # Get latest session for each unique user
+        query = """
+            SELECT 
+                a.username,
+                a.email,
+                a.domain,
+                a.designation,
+                a.role,
+                a.login_time,
+                a.logout_time,
+                a.created_at,
+                CASE WHEN a.logout_time IS NULL THEN 'online' ELSE 'offline' END as status,
+                CASE WHEN a.logout_time IS NULL THEN 'logout' ELSE 'login' END as action
+            FROM activity a
+            INNER JOIN (
+                SELECT username, MAX(id) as max_id
+                FROM activity
+                WHERE app_name='system' AND action='session'
+                GROUP BY username
+            ) latest ON a.id = latest.max_id
+            WHERE a.app_name='system' AND a.action='session'
+        """
+        
+        params = []
+        if role_filter:
+            query += " AND a.role=%s"
+            params.append(role_filter)
+        
+        query += " ORDER BY a.login_time DESC"
+        
+        cursor.execute(query, params)
+        users = cursor.fetchall()
+        
+        return jsonify({
+            "total": len(users),
+            "users": [
+                {
+                    "username": u.get("username"),
+                    "email": u.get("email"),
+                    "domain": u.get("domain"),
+                    "designation": u.get("designation"),
+                    "role": u.get("role"),
+                    "status": u.get("status"),
+                    "action": u.get("action"),
+                    "login_time": u.get("login_time").strftime("%Y-%m-%d %H:%M:%S") if u.get("login_time") else None,
+                    "last_activity": u.get("created_at").strftime("%Y-%m-%d %H:%M:%S") if u.get("created_at") else None
+                }
+                for u in users
+            ]
+        }), 200
+        
     except Exception as e:
         return jsonify({"error": str(e)}), 500
     finally:
