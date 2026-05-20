@@ -1,81 +1,87 @@
 # agent/auth/login.py
 
 import logging
+
 from werkzeug.security import check_password_hash
-from auth.session import start_session, end_session, normalize_domain
+
+from auth.session import end_session, normalize_domain, start_session
 from storage.db import get_mysql_connection
 
 logger = logging.getLogger("LOGIN")
 
 
+def _find_account(cursor, login_value):
+    for table_name in ("users", "admins"):
+        cursor.execute(
+            f"""
+            SELECT id, username, password, role, email, domain, designation,
+                   %s AS account_type
+            FROM {table_name}
+            WHERE LOWER(username) = LOWER(%s) OR LOWER(email) = LOWER(%s)
+            LIMIT 1
+            """,
+            (table_name, login_value, login_value),
+        )
+        account = cursor.fetchone()
+        if account:
+            return account
+
+    return None
+
+
 def login_user(email, password):
     conn = None
+    cur = None
+
     try:
-        email = email.strip()
+        login_value = email.strip()
         password = password.strip()
 
         print("====================================")
         print("LOGIN PROCESS STARTED")
-        print(f"Username/Email entered: '{email}'")
+        print(f"Username/Email entered: '{login_value}'")
         print("====================================")
 
-        # ✅ FIXED: Use MySQL connection instead of SQLite
         conn = get_mysql_connection()
+        cur = conn.cursor(dictionary=True)
 
-        if not conn:
-            print("❌ Database connection FAILED")
+        account = _find_account(cur, login_value)
+        if not account:
+            print(f"No account found: '{login_value}'")
             return False
 
-        print("✅ MySQL Database connection SUCCESS")
-        cur = conn.cursor()
-
-        print("📦 Fetching data from TABLE: users")
-
-        cur.execute(
-            """
-            SELECT id, username, password, role, email, domain, designation
-            FROM users
-            WHERE LOWER(username) = LOWER(%s) OR LOWER(email) = LOWER(%s)
-            """,
-            (email, email),
+        print(
+            f"Account found in {account.get('account_type')}: "
+            f"'{account.get('username')}' | Role: '{account.get('role')}'"
         )
 
-        user_record = cur.fetchone()
-
-        if not user_record:
-            print(f"❌ No user found: '{email}'")
+        if not check_password_hash(account.get("password") or "", password):
+            print("Incorrect password.")
             return False
 
-        user_id, db_username, db_password, role, db_email, domain, designation = user_record
+        print("Password matches. Login successful.")
 
-        print(f"✅ User found: '{db_username}' | Role: '{role}'")
-
-        if check_password_hash(db_password, password):
-            print("✅ Password matches. Login successful.")
-
-            domain = normalize_domain(domain)
-            start_session(
-                user_id=user_id,
-                username=db_username,
-                role=role,
-                email=db_email,
-                domain=domain,
-                designation=designation,
-            )
-            return True
-        else:
-            print("❌ Incorrect password.")
-            return False
+        start_session(
+            user_id=account.get("id"),
+            username=account.get("username"),
+            role=account.get("role"),
+            email=account.get("email"),
+            domain=normalize_domain(account.get("domain")),
+            designation=account.get("designation"),
+        )
+        return True
 
     except Exception as e:
-        print(f"🔥 LOGIN ERROR: {e}")
+        print(f"LOGIN ERROR: {e}")
         logger.exception("Login error")
         return False
 
     finally:
+        if cur:
+            cur.close()
         if conn:
             conn.close()
-            print("📦 Database connection closed.")
+            print("Database connection closed.")
 
 
 def logout_user():

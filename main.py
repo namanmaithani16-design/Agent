@@ -10,11 +10,9 @@ from background.worker import start_worker, stop_worker
 from config import APP_NAME
 from monitor.screenshot import capture_screenshot
 
-# ✅ IMPORTANT
 from utils.api_client import send_event
 from storage.db import init_db, log_login, log_logout, log_activity
 from auth.session import get_current_user
-
 
 
 # ================= LOGGING =================
@@ -29,14 +27,13 @@ logger = logging.getLogger("MAIN")
 _monitoring_running = False
 _shutdown_in_progress = False
 
-_state_lock = threading.Lock()   # 🔹 upgrade: thread safety
+_state_lock = threading.Lock()
 
 _screenshot_thread = None
 _screenshot_stop_event = threading.Event()
 
 SCREENSHOT_INTERVAL = 60  # seconds
 
-# Global variables for session IDs
 _activity_id = None
 _logs_id = None
 
@@ -56,9 +53,10 @@ def _screenshot_loop():
 
     while not _screenshot_stop_event.is_set():
         try:
-            # 🔹 FIX: Send a continuous heartbeat to the activity table 
-            # so the web panel sees active presence and doesn't auto-logout after 5 minutes
             log_activity("heartbeat", "system", None, None)
+
+            # Send heartbeat explicitly to the central server so it can update online status
+            _safe_send_event("heartbeat")
 
             screenshot_path = capture_screenshot("interval")
 
@@ -121,7 +119,7 @@ def shutdown(exit_code=0):
     _screenshot_stop_event.set()
     stop_monitoring()
 
-    time.sleep(1)  # 🔹 small delay for clean thread exit
+    time.sleep(1)  # small delay for clean thread exit
     sys.exit(exit_code)
 
 
@@ -140,7 +138,7 @@ def on_login_success():
     # Log to database
     _activity_id, _logs_id = log_login()
 
-    # 🔹 Send login event
+    # Send login event
     try:
         screenshot_path = capture_screenshot("login")
         if screenshot_path:
@@ -148,10 +146,10 @@ def on_login_success():
     except Exception:
         logger.exception("Failed to send login event")
 
-    # 🔹 Start monitoring
+    # Start monitoring
     start_monitoring()
 
-    # 🔹 Start screenshot thread
+    # Start screenshot thread
     global _screenshot_thread
     _screenshot_stop_event.clear()
 
@@ -162,7 +160,7 @@ def on_login_success():
         )
         _screenshot_thread.start()
 
-    # 🔹 Open logout window
+    # Open logout window
     LogoutWindow(on_logout=on_logout)
 
 
@@ -170,9 +168,14 @@ def on_logout():
     global _activity_id, _logs_id
     logger.info("Employee logout initiated")
 
-    # Log logout to database
-    if _activity_id is not None or _logs_id is not None:
+    try:
         log_logout(_activity_id, _logs_id)
+        logger.info(f"Logout logged - activity_id={_activity_id}, logs_id={_logs_id}")
+    except Exception as e:
+        logger.error(f"Failed to log logout: {e}")
+
+    # ✅ FIX: Give DB time to commit before sending event or shutting down
+    time.sleep(2)
 
     try:
         screenshot_path = capture_screenshot("logout")
@@ -181,13 +184,16 @@ def on_logout():
     except Exception:
         logger.exception("Failed to send logout event")
 
+    # ✅ FIX: Extra delay to ensure all writes are done before sys.exit
+    time.sleep(1)
+
     shutdown(0)
 
 
 # ================= SIGNAL HANDLING =================
 def _handle_signal(signum, frame):
     logger.warning(f"System signal received: {signum}")
-    shutdown(0)
+    on_logout()  # ✅ FIX: call on_logout instead of shutdown directly so DB gets updated
 
 
 signal.signal(signal.SIGINT, _handle_signal)
@@ -198,9 +204,7 @@ signal.signal(signal.SIGTERM, _handle_signal)
 def main():
     logger.info(f"{APP_NAME} starting")
 
-    # Initialize database
     init_db()
-     
 
     try:
         login_window = LoginWindow(on_success=on_login_success)

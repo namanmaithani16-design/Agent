@@ -1,13 +1,18 @@
 import time
 import ctypes
 import psutil
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 
 from auth.session import is_active, get_current_user
-from storage.db import get_connection, init_db
+from storage.db import ensure_mysql_activity_table, get_mysql_connection, init_db
 
 
 user32 = ctypes.windll.user32
+IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def now_ist():
+    return datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S")
 
 
 # ==========================================
@@ -35,43 +40,54 @@ def get_foreground_process():
 # SAVE APP USAGE TO DATABASE
 # ==========================================
 
-def save_app_usage(username, app, start, end, duration):
+def save_app_usage(user, app, start, end, duration):
 
-    conn = get_connection()
-
-    if not conn:
-        print("[APP USAGE] Database connection failed")
-        return
-
-    cur = conn.cursor()
+    conn = None
+    cur = None
 
     try:
+        conn = get_mysql_connection()
+
+        if not conn:
+            print("[APP USAGE] Database connection failed")
+            return
+
+        cur = conn.cursor()
+        ensure_mysql_activity_table(cur)
 
         cur.execute(
             """
             INSERT INTO activity
-            (username, app_name, action, start_time, end_time, duration, created_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            (username, email, domain, designation, role, app_name, action, start_time, end_time, duration, login_time, created_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
-                username,
+                user.get("username"),
+                user.get("email"),
+                user.get("domain"),
+                user.get("designation"),
+                user.get("role"),
                 app,
                 "app_usage",
                 start,
                 end,
                 duration,
-                datetime.now()
+                now_ist(),
+                now_ist(),
             )
         )
 
         conn.commit()
+        print(f"[APP USAGE] Saved: {app} ({duration}s) for '{user.get('username')}'")
 
     except Exception as e:
         print("[APP USAGE] DB Error:", e)
 
     finally:
-        cur.close()
-        conn.close()
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()
 
 
 # ==========================================
@@ -109,13 +125,13 @@ def app_usage_monitor(poll_interval=5):
 
                 print(
                     f"[APP USAGE] {current_app} "
-                    f"{start_time.strftime('%H:%M:%S')} → "
+                    f"{start_time.strftime('%H:%M:%S')} -> "
                     f"{now.strftime('%H:%M:%S')} "
                     f"({duration}s)"
                 )
 
                 save_app_usage(
-                    username=username,
+                    user=session_user,
                     app=current_app,
                     start=start_time,
                     end=now,

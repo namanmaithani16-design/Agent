@@ -29,8 +29,8 @@ IDLE_LIMIT = int(os.getenv("IDLE_LIMIT", "600"))                      # 10 minut
 
 APP_NAME = os.getenv("APP_NAME", "ISMS Agent")
 
-DB_HOST = os.getenv("DB_HOST", "localhost")
-DB_USER = os.getenv("DB_USER", "root")
-DB_PASSWORD = os.getenv("DB_PASSWORD", "")
-DB_NAME = os.getenv("DB_NAME", "isms")
-DB_PORT = int(os.getenv("DB_PORT", "3306"))
+DB_HOST     = os.getenv("DB_HOST",     "93.127.199.4")
+DB_USER     = os.getenv("DB_USER",     "admin")
+DB_PASSWORD = os.getenv("DB_PASSWORD", "Dhiru@711#")
+DB_NAME     = os.getenv("DB_NAME",     "isms")
+DB_PORT     = int(os.getenv("DB_PORT", "3306"))

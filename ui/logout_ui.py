@@ -23,11 +23,8 @@ class LogoutWindow:
         self.root.mainloop()
 
     def on_close(self):
-        # Destroy window immediately
         self.root.destroy()
-        
-        # Run cleanup in background thread
-        threading.Thread(target=self._logout_cleanup, daemon=True).start()
+        self._logout_cleanup()
 
     def build_ui(self):
         container = tk.Frame(self.root)
@@ -133,11 +130,8 @@ class LogoutWindow:
             msg = "Are you sure you want to logout?"
             
         if messagebox.askyesno("Confirm Logout", msg):
-            # Destroy window immediately for instant visual feedback
             self.root.destroy()
-            
-            # Run cleanup operations in background thread (non-blocking)
-            threading.Thread(target=self._logout_cleanup, daemon=True).start()
+            self._logout_cleanup()
     
     def _logout_cleanup(self):
         """Background cleanup to prevent UI blocking"""

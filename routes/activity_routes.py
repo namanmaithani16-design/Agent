@@ -1,9 +1,11 @@
 from flask import Blueprint, request, jsonify
 import mysql.connector
-from datetime import datetime
+import os
+from datetime import datetime, timedelta
 from config import DB_HOST, DB_NAME, DB_PASSWORD, DB_PORT, DB_USER
 
 activity_bp = Blueprint("activity_bp", __name__)
+ACTIVE_SESSION_TIMEOUT_SECONDS = int(os.getenv("ACTIVE_SESSION_TIMEOUT_SECONDS", "180"))
 
 
 def normalize_domain(domain):
@@ -99,6 +101,108 @@ def ensure_activity_table(cursor):
             cursor.execute(alter_sql)
 
 
+def ensure_user_admin_tables(cursor):
+    for table in ["users", "admins"]:
+        try:
+            cursor.execute(f"SHOW COLUMNS FROM {table}")
+            existing_columns = {row[0] for row in cursor.fetchall()}
+            if "status" not in existing_columns:
+                cursor.execute(f"ALTER TABLE {table} ADD COLUMN status VARCHAR(50) DEFAULT 'offline'")
+            if "last_seen" not in existing_columns:
+                cursor.execute(f"ALTER TABLE {table} ADD COLUMN last_seen DATETIME")
+        except Exception:
+            pass
+
+
+
+def format_datetime(value):
+    return value.strftime("%Y-%m-%d %H:%M:%S") if value else None
+
+
+def close_stale_sessions(cursor):
+    """
+    Close sessions that never received a logout because the agent stopped,
+    lost network, or the machine went offline.
+    """
+    cutoff = datetime.now() - timedelta(seconds=ACTIVE_SESSION_TIMEOUT_SECONDS)
+
+    cursor.execute(
+        """
+        SELECT
+            s.id,
+            s.username,
+            COALESCE(MAX(COALESCE(e.created_at, e.end_time, e.start_time, e.login_time)), s.created_at, s.login_time) AS last_seen
+        FROM activity s
+        LEFT JOIN activity e
+          ON LOWER(TRIM(e.username)) = LOWER(TRIM(s.username))
+        WHERE s.app_name='system'
+          AND s.action='session'
+          AND s.logout_time IS NULL
+        GROUP BY s.id, s.username, s.created_at, s.login_time
+        HAVING last_seen IS NOT NULL AND last_seen < %s
+        """,
+        (cutoff,)
+    )
+
+    stale_sessions = cursor.fetchall()
+
+    for row in stale_sessions:
+        if isinstance(row, dict):
+            session_id = row.get("id")
+            username = row.get("username")
+            last_seen = row.get("last_seen")
+        else:
+            session_id, username, last_seen = row
+
+        cursor.execute(
+            """
+            UPDATE activity
+            SET logout_time=%s,
+                created_at=%s
+            WHERE id=%s
+              AND logout_time IS NULL
+            """,
+            (last_seen, last_seen, session_id)
+        )
+
+        cursor.execute(
+            """
+            UPDATE logs
+            SET logout_time=%s,
+                action='logout'
+            WHERE LOWER(TRIM(username)) = LOWER(TRIM(%s))
+              AND logout_time IS NULL
+              AND (login_time IS NULL OR login_time <= %s)
+            """,
+            (last_seen, username, last_seen)
+        )
+
+        cursor.execute("UPDATE users SET status='offline', last_seen=%s WHERE username=%s", (last_seen, username))
+        cursor.execute("UPDATE admins SET status='offline', last_seen=%s WHERE username=%s", (last_seen, username))
+
+
+def mark_closed_logs_as_logout(cursor, username=None, email=None):
+    username = (username or "").strip()
+    email = (email or "").strip()
+
+    if not username and not email:
+        return
+
+    cursor.execute(
+        """
+        UPDATE logs
+        SET action='logout'
+        WHERE logout_time IS NOT NULL
+          AND COALESCE(action, '') <> 'logout'
+          AND (
+            (%s <> '' AND LOWER(TRIM(username)) = LOWER(TRIM(%s)))
+            OR (%s <> '' AND LOWER(TRIM(email)) = LOWER(TRIM(%s)))
+          )
+        """,
+        (username, username, email, email),
+    )
+
+
 @activity_bp.route("/api/activity", methods=["POST", "PATCH"])
 def receive_activity():
     conn = None
@@ -127,24 +231,64 @@ def receive_activity():
         cursor = conn.cursor()
 
         ensure_activity_table(cursor)
+        ensure_user_admin_tables(cursor)
+        close_stale_sessions(cursor)
+        mark_closed_logs_as_logout(cursor, username=username, email=email)
+
+        if action in ["heartbeat", "screenshot", "login"]:
+            cursor.execute("UPDATE users SET status='online', last_seen=%s WHERE username=%s", (timestamp, username))
+            if cursor.rowcount == 0:
+                cursor.execute("UPDATE admins SET status='online', last_seen=%s WHERE username=%s", (timestamp, username))
+            
+            # Force latest session to stay online (re-open if accidentally closed)
+            cursor.execute("""
+                UPDATE activity 
+                SET logout_time = NULL 
+                WHERE id = (
+                    SELECT max_id FROM (
+                        SELECT MAX(id) as max_id FROM activity 
+                        WHERE username = %s AND action = 'session' AND app_name = 'system'
+                    ) tmp
+                )
+            """, (username,))
+            
+        elif action == "logout":
+            cursor.execute("UPDATE users SET status='offline', last_seen=%s WHERE username=%s", (timestamp, username))
+            if cursor.rowcount == 0:
+                cursor.execute("UPDATE admins SET status='offline', last_seen=%s WHERE username=%s", (timestamp, username))
 
         if action == "login":
-            cursor.execute("SELECT id FROM activity WHERE username=%s AND app_name='system' AND action='session' AND logout_time IS NULL LIMIT 1", (username,))
-            active = cursor.fetchone()
-            if active:
-                cursor.execute(
-                    "UPDATE activity SET login_time=%s, idle_time=%s, screenshot_path=COALESCE(%s, screenshot_path), created_at=%s WHERE id=%s",
-                    (login_time, idle_time, screenshot, timestamp, active[0])
-                )
-            else:
-                cursor.execute(
-                    """
-                    INSERT INTO activity
-                    (username, email, domain, designation, role, app_name, action, login_time, idle_time, screenshot_path, created_at)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    """,
-                    (username, email, domain, designation, role, "system", "session", login_time, idle_time, screenshot, timestamp)
-                )
+            cursor.execute(
+                """
+                UPDATE activity
+                SET logout_time=%s
+                WHERE username=%s
+                  AND app_name='system'
+                  AND action='session'
+                  AND logout_time IS NULL
+                """,
+                (timestamp, username)
+            )
+
+            cursor.execute(
+                """
+                UPDATE logs
+                SET logout_time=%s,
+                    action='logout'
+                WHERE username=%s
+                  AND logout_time IS NULL
+                """,
+                (timestamp, username)
+            )
+
+            cursor.execute(
+                """
+                INSERT INTO activity
+                (username, email, domain, designation, role, app_name, action, login_time, idle_time, screenshot_path, created_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (username, email, domain, designation, role, "system", "session", login_time, idle_time, screenshot, timestamp)
+            )
         elif action == "logout":
             cursor.execute(
                 """
@@ -170,8 +314,25 @@ def receive_activity():
                     "session"
                 )
             )
+            activity_rowcount = cursor.rowcount
 
-            if cursor.rowcount == 0:
+            cursor.execute(
+                """
+                UPDATE logs
+                SET logout_time=%s,
+                    action='logout'
+                WHERE logout_time IS NULL
+                  AND (
+                    LOWER(TRIM(username)) = LOWER(TRIM(%s))
+                    OR LOWER(TRIM(email)) = LOWER(TRIM(%s))
+                  )
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (logout_time, username or "", email or "")
+            )
+
+            if activity_rowcount == 0:
                 cursor.execute(
                     """
                     INSERT INTO activity
@@ -242,6 +403,8 @@ def get_latest_logs():
     try:
         conn = get_db_connection()
         cursor = conn.cursor(dictionary=True)
+        close_stale_sessions(cursor)
+        conn.commit()
         
         cursor.execute(
             """
@@ -286,6 +449,8 @@ def get_user_status():
         
         conn = get_db_connection()
         cursor = conn.cursor(dictionary=True)
+        close_stale_sessions(cursor)
+        conn.commit()
         
         # Get the most recent session activity for this user
         cursor.execute(
@@ -317,8 +482,9 @@ def get_user_status():
             "username": username,
             "status": "online" if is_online else "offline",
             "action": "logout" if is_online else "login",
-            "login_time": session_row.get("login_time").strftime("%Y-%m-%d %H:%M:%S") if session_row.get("login_time") else None,
-            "last_activity": session_row.get("created_at").strftime("%Y-%m-%d %H:%M:%S") if session_row.get("created_at") else None,
+            "login_time": format_datetime(session_row.get("login_time")),
+            "logout_time": format_datetime(session_row.get("logout_time")),
+            "last_activity": format_datetime(session_row.get("created_at")),
             "email": session_row.get("email"),
             "domain": session_row.get("domain"),
             "designation": session_row.get("designation")
@@ -350,6 +516,8 @@ def get_active_users():
         
         conn = get_db_connection()
         cursor = conn.cursor(dictionary=True)
+        close_stale_sessions(cursor)
+        conn.commit()
         
         # Get latest session for each unique user
         query = """
@@ -395,8 +563,9 @@ def get_active_users():
                     "role": u.get("role"),
                     "status": u.get("status"),
                     "action": u.get("action"),
-                    "login_time": u.get("login_time").strftime("%Y-%m-%d %H:%M:%S") if u.get("login_time") else None,
-                    "last_activity": u.get("created_at").strftime("%Y-%m-%d %H:%M:%S") if u.get("created_at") else None
+                    "login_time": format_datetime(u.get("login_time")),
+                    "logout_time": format_datetime(u.get("logout_time")),
+                    "last_activity": format_datetime(u.get("created_at"))
                 }
                 for u in users
             ]
