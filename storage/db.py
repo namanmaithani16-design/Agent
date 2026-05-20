@@ -52,6 +52,32 @@ def _column_names(cursor, table_name):
 
 
 def ensure_mysql_activity_table(cursor):
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS activity (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            username VARCHAR(100),
+            email VARCHAR(150),
+            domain VARCHAR(150),
+            designation VARCHAR(150),
+            role VARCHAR(50),
+            app_name VARCHAR(150),
+            action VARCHAR(50),
+            start_time DATETIME,
+            end_time DATETIME,
+            login_time DATETIME,
+            logout_time DATETIME,
+            idle_time INT DEFAULT 0,
+            screenshot_path LONGTEXT,
+            app_url TEXT,
+            duration INT,
+            window_title TEXT,
+            metadata TEXT,
+            created_at DATETIME
+        )
+        """
+    )
+
     expected_columns = {
         "email": "ALTER TABLE activity ADD COLUMN email VARCHAR(150)",
         "domain": "ALTER TABLE activity ADD COLUMN domain VARCHAR(150)",
@@ -75,6 +101,31 @@ def ensure_mysql_activity_table(cursor):
     for column_name, alter_sql in expected_columns.items():
         if column_name not in existing_columns:
             cursor.execute(alter_sql)
+
+
+def ensure_mysql_logs_table(cursor):
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS logs (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            user_id INT,
+            username VARCHAR(100),
+            email VARCHAR(150),
+            domain VARCHAR(150),
+            designation VARCHAR(150),
+            role VARCHAR(50),
+            action VARCHAR(50),
+            login_time DATETIME,
+            logout_time DATETIME,
+            created_at DATETIME
+        )
+        """
+    )
+
+
+def ensure_mysql_schema(cursor):
+    ensure_mysql_activity_table(cursor)
+    ensure_mysql_logs_table(cursor)
 
 
 def update_account_status(cursor, username=None, email=None, status="offline", last_seen=None):
@@ -121,6 +172,19 @@ def init_db():
     """)
     conn.commit()
     conn.close()
+
+    try:
+        mysql_conn = get_mysql_connection()
+        mysql_cursor = mysql_conn.cursor()
+        ensure_mysql_schema(mysql_cursor)
+        mysql_conn.commit()
+    except Exception as e:
+        print(f"[DB] MySQL schema initialization skipped: {e}")
+    finally:
+        if 'mysql_cursor' in locals() and mysql_cursor:
+            mysql_cursor.close()
+        if 'mysql_conn' in locals() and mysql_conn:
+            mysql_conn.close()
 
 
 def get_open_session_activity(username):
@@ -307,7 +371,7 @@ def log_login():
 
         conn   = get_mysql_connection()
         cursor = conn.cursor(dictionary=True)
-        ensure_mysql_activity_table(cursor)
+        ensure_mysql_schema(cursor)
 
         account = resolve_account(cursor, username=username, email=email)
         if account:
@@ -383,6 +447,7 @@ def log_logout(activity_id=None, logs_id=None):
 
         conn = get_mysql_connection()
         cursor = conn.cursor()
+        ensure_mysql_schema(cursor)
 
         if username or email:
             update_account_status(cursor, username=username, email=email, status="offline", last_seen=now)
