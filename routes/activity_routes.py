@@ -71,6 +71,8 @@ def ensure_activity_table(cursor):
             screenshot_path LONGTEXT,
             app_url TEXT,
             duration INT,
+            window_title TEXT,
+            metadata TEXT,
             created_at DATETIME
         )
         """
@@ -90,6 +92,8 @@ def ensure_activity_table(cursor):
         "screenshot_path": "ALTER TABLE activity ADD COLUMN screenshot_path LONGTEXT",
         "app_url": "ALTER TABLE activity ADD COLUMN app_url TEXT",
         "duration": "ALTER TABLE activity ADD COLUMN duration INT",
+        "window_title": "ALTER TABLE activity ADD COLUMN window_title TEXT",
+        "metadata": "ALTER TABLE activity ADD COLUMN metadata TEXT",
         "created_at": "ALTER TABLE activity ADD COLUMN created_at DATETIME",
     }
 
@@ -203,11 +207,75 @@ def mark_closed_logs_as_logout(cursor, username=None, email=None):
     )
 
 
-@activity_bp.route("/api/activity", methods=["POST", "PATCH"])
+@activity_bp.route("/api/activity", methods=["GET", "POST", "PATCH"])
 def receive_activity():
     conn = None
     cursor = None
     try:
+        if request.method == "GET":
+            username = (request.args.get("username") or "").strip()
+            action = (request.args.get("action") or "").strip()
+            try:
+                limit = min(int(request.args.get("limit", 200)), 1000)
+            except ValueError:
+                limit = 200
+
+            conn = get_db_connection()
+            cursor = conn.cursor(dictionary=True)
+            ensure_activity_table(cursor)
+
+            query = """
+                SELECT
+                    id,
+                    username,
+                    email,
+                    domain,
+                    designation,
+                    role,
+                    app_name,
+                    action,
+                    start_time,
+                    end_time,
+                    duration,
+                    app_url,
+                    window_title,
+                    idle_time,
+                    created_at
+                FROM activity
+                WHERE (%s = '' OR LOWER(TRIM(username)) = LOWER(TRIM(%s))
+                       OR LOWER(TRIM(email)) = LOWER(TRIM(%s)))
+                  AND (%s = '' OR action = %s)
+                ORDER BY id DESC
+                LIMIT %s
+            """
+            cursor.execute(query, (username, username, username, action, action, limit))
+            rows = cursor.fetchall()
+
+            return jsonify({
+                "success": True,
+                "total": len(rows),
+                "activity": [
+                    {
+                        "id": row.get("id"),
+                        "username": row.get("username"),
+                        "email": row.get("email"),
+                        "domain": row.get("domain"),
+                        "designation": row.get("designation"),
+                        "role": row.get("role"),
+                        "app_name": row.get("app_name"),
+                        "action": row.get("action"),
+                        "start_time": format_datetime(row.get("start_time")),
+                        "end_time": format_datetime(row.get("end_time")),
+                        "duration": row.get("duration"),
+                        "app_url": row.get("app_url"),
+                        "window_title": row.get("window_title"),
+                        "idle_time": row.get("idle_time"),
+                        "created_at": format_datetime(row.get("created_at")),
+                    }
+                    for row in rows
+                ],
+            }), 200
+
         data = request.get_json() or {}
 
         # Get all data from the agent's payload
@@ -221,7 +289,14 @@ def receive_activity():
         timestamp = parse_datetime(metadata.get("timestamp")) or datetime.now()
         login_time = parse_datetime(metadata.get("login_time")) or timestamp
         logout_time = parse_datetime(metadata.get("logout_time")) or timestamp
+        start_time = parse_datetime(metadata.get("start_time"))
+        end_time = parse_datetime(metadata.get("end_time"))
         idle_time = int(metadata.get("idle_time") or 0)
+        duration = metadata.get("duration")
+        duration = int(duration) if duration not in (None, "") else None
+        app_name = data.get("app_name") or metadata.get("app_name") or "system"
+        app_url = data.get("app_url") or metadata.get("app_url")
+        window_title = data.get("window_title") or metadata.get("window_title")
         designation = data.get("designation")
 
         if not username:
@@ -358,8 +433,9 @@ def receive_activity():
             cursor.execute(
                 """
                 INSERT INTO activity
-                (username, email, domain, designation, role, app_name, action, screenshot_path, created_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                (username, email, domain, designation, role, app_name, action, start_time, end_time,
+                 duration, screenshot_path, app_url, window_title, metadata, created_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     username,
@@ -367,9 +443,15 @@ def receive_activity():
                     domain,
                     designation,
                     role,
-                    "system",
+                    app_name,
                     action,
+                    start_time,
+                    end_time,
+                    duration,
                     screenshot,
+                    app_url,
+                    window_title,
+                    str(metadata) if metadata else None,
                     timestamp
                 )
             )
@@ -408,7 +490,20 @@ def get_latest_logs():
         
         cursor.execute(
             """
-            SELECT l1.*
+            SELECT
+                l1.id,
+                l1.user_id,
+                l1.username,
+                l1.email,
+                l1.domain,
+                l1.login_time,
+                l1.logout_time,
+                l1.role,
+                l1.designation,
+                l1.created_at,
+                l1.action AS log_action,
+                CASE WHEN l1.logout_time IS NULL THEN 'online' ELSE 'offline' END AS status,
+                l1.action AS action
             FROM logs l1
             INNER JOIN (
                 SELECT username, MAX(id) as latest_id

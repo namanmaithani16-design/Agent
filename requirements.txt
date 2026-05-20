@@ -2,6 +2,7 @@ requests
 pillow
 pyautogui
 psutil
+pywinauto
 pystray
 flask
 mysql-connector-python
